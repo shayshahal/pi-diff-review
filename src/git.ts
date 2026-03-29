@@ -137,7 +137,11 @@ function toDisplayPath(change: ChangedPath): string {
   return change.newPath ?? change.oldPath ?? "(unknown)";
 }
 
-export async function getDiffReviewFiles(pi: ExtensionAPI, cwd: string): Promise<{ repoRoot: string; files: DiffReviewFile[] }> {
+export async function getDiffReviewFiles(
+  pi: ExtensionAPI,
+  cwd: string,
+  filterPaths?: Set<string>,
+): Promise<{ repoRoot: string; files: DiffReviewFile[] }> {
   const repoRoot = await getRepoRoot(pi, cwd);
   const repositoryHasHead = await hasHead(pi, repoRoot);
 
@@ -148,7 +152,16 @@ export async function getDiffReviewFiles(pi: ExtensionAPI, cwd: string): Promise
 
   const trackedPaths = parseNameStatus(trackedOutput);
   const untrackedPaths = parseUntrackedPaths(untrackedOutput);
-  const changedPaths = mergeChangedPaths(trackedPaths, untrackedPaths);
+  let changedPaths = mergeChangedPaths(trackedPaths, untrackedPaths);
+
+  // When filterPaths is provided, keep only entries whose paths overlap.
+  if (filterPaths != null && filterPaths.size > 0) {
+    changedPaths = changedPaths.filter((change) => {
+      if (change.oldPath != null && filterPaths.has(change.oldPath)) return true;
+      if (change.newPath != null && filterPaths.has(change.newPath)) return true;
+      return false;
+    });
+  }
 
   const files = await Promise.all(
     changedPaths.map(async (change, index): Promise<DiffReviewFile> => {

@@ -1,7 +1,8 @@
+import { isAbsolute, relative } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
 import { open, type GlimpseWindow } from "glimpseui";
-import { getDiffReviewFiles } from "./git.js";
+import { getDiffReviewFiles, getRepoRoot } from "./git.js";
 import { composeReviewPrompt } from "./prompt.js";
 import type { ReviewSubmitPayload, ReviewWindowMessage } from "./types.js";
 import { buildReviewHtml } from "./ui.js";
@@ -18,6 +19,34 @@ type ReviewWindow = GlimpseWindow | WSLWindow;
 export default function (pi: ExtensionAPI) {
   let activeWindow: ReviewWindow | null = null;
   let activeWaitingUIDismiss: (() => void) | null = null;
+
+  /* ── Track files touched during this session ───────────────────────── */
+
+  const sessionTouchedFiles = new Set<string>();
+
+  /** Normalise an absolute path to a repo-relative path (best-effort). */
+  function toRepoRelative(absPath: string, cwd: string): string {
+    // Paths from tool calls are typically already absolute.
+    const rel = relative(cwd, absPath);
+    // If relative() produced something outside the cwd, keep as-is.
+    if (rel.startsWith("..") || isAbsolute(rel)) return absPath;
+    return rel;
+  }
+
+  function recordPath(rawPath: string, cwd: string): void {
+    const abs = isAbsolute(rawPath) ? rawPath : undefined;
+    // Store the repo-relative form so it matches git diff output.
+    sessionTouchedFiles.add(abs != null ? toRepoRelative(abs, cwd) : rawPath);
+  }
+
+  pi.on("tool_result", async (event, ctx) => {
+    const cwd = ctx.cwd;
+    if (event.toolName === "edit" || event.toolName === "write") {
+      const path = (event.input as { path?: string }).path;
+      if (typeof path === "string") recordPath(path, cwd);
+    }
+    // bash tool: we can't easily know what files it changed, skip.
+  });
 
   function closeActiveWindow(): void {
     if (activeWindow == null) return;
@@ -94,15 +123,34 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  async function reviewDiff(ctx: ExtensionCommandContext): Promise<void> {
+  async function reviewDiff(ctx: ExtensionCommandContext, sessionOnly: boolean): Promise<void> {
     if (activeWindow != null) {
       ctx.ui.notify("A diff review window is already open.", "warning");
       return;
     }
 
-    const { repoRoot, files } = await getDiffReviewFiles(pi, ctx.cwd);
+    let filterPaths: Set<string> | undefined;
+    if (sessionOnly) {
+      if (sessionTouchedFiles.size === 0) {
+        ctx.ui.notify("No files were edited or written in this session.", "info");
+        return;
+      }
+      // Re-resolve paths relative to the repo root (not cwd).
+      try {
+        const repoRoot = await getRepoRoot(pi, ctx.cwd);
+        filterPaths = new Set<string>();
+        for (const p of sessionTouchedFiles) {
+          const abs = isAbsolute(p) ? p : undefined;
+          filterPaths.add(abs != null ? toRepoRelative(abs, repoRoot) : toRepoRelative(p, repoRoot));
+        }
+      } catch {
+        filterPaths = sessionTouchedFiles;
+      }
+    }
+
+    const { repoRoot, files } = await getDiffReviewFiles(pi, ctx.cwd, filterPaths);
     if (files.length === 0) {
-      ctx.ui.notify("No git diff to review.", "info");
+      ctx.ui.notify(sessionOnly ? "No session changes to review (files may already be committed)." : "No git diff to review.", "info");
       return;
     }
 
@@ -197,10 +245,25 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.registerCommand("diff-review", {
-    description: "Open a native diff review window and insert review feedback into the editor",
+    description: "Review the full working-tree diff against HEAD in a native diff window",
     handler: async (_args, ctx) => {
-      await reviewDiff(ctx);
+      await reviewDiff(ctx, false);
     },
+  });
+
+  pi.registerCommand("diff-review-session", {
+    description: "Review only the files edited/written during this pi session",
+    handler: async (_args, ctx) => {
+      await reviewDiff(ctx, true);
+    },
+  });
+
+  pi.on("session_start", async () => {
+    sessionTouchedFiles.clear();
+  });
+
+  pi.on("session_switch", async () => {
+    sessionTouchedFiles.clear();
   });
 
   pi.on("session_shutdown", async () => {

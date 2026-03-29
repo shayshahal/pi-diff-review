@@ -36,4 +36,6 @@ export type ReviewWindowMessage = ReviewSubmitPayload | ReviewCancelPayload;
 export interface DiffReviewWindowData {
   repoRoot: string;
   files: DiffReviewFile[];
+  /** File ids that were touched during this pi session (edit/write). Empty when nothing was tracked. */
+  sessionFileIds: string[];
 }

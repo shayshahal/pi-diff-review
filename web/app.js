@@ -1,5 +1,8 @@
 const reviewData = JSON.parse(document.getElementById("diff-review-data").textContent || "{}");
 
+const sessionFileIdSet = new Set(reviewData.sessionFileIds || []);
+const hasSessionFiles = sessionFileIdSet.size > 0;
+
 const state = {
   activeFileId: reviewData.files[0]?.id ?? null,
   comments: [],
@@ -9,7 +12,13 @@ const state = {
   collapsedDirs: {},
   reviewedFiles: {},
   scrollPositions: {},
+  filterSession: false,
 };
+
+function visibleFiles() {
+  if (!state.filterSession) return reviewData.files;
+  return reviewData.files.filter((f) => sessionFileIdSet.has(f.id));
+}
 
 const repoRootEl = document.getElementById("repo-root");
 const fileTreeEl = document.getElementById("file-tree");
@@ -22,6 +31,7 @@ const submitButton = document.getElementById("submit-button");
 const cancelButton = document.getElementById("cancel-button");
 const overallCommentButton = document.getElementById("overall-comment-button");
 const fileCommentButton = document.getElementById("file-comment-button");
+const filterSessionButton = document.getElementById("filter-session-button");
 const toggleReviewedButton = document.getElementById("toggle-reviewed-button");
 const toggleUnchangedButton = document.getElementById("toggle-unchanged-button");
 const toggleWrapButton = document.getElementById("toggle-wrap-button");
@@ -228,6 +238,15 @@ function updateToggleButtons() {
     : "cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1 text-xs font-medium text-review-text hover:bg-[#21262d]";
   toggleUnchangedButton.textContent = state.hideUnchanged ? "Show full file" : "Show changed areas only";
   toggleWrapButton.textContent = `Wrap lines: ${state.wrapLines ? "on" : "off"}`;
+
+  if (hasSessionFiles) {
+    filterSessionButton.classList.remove("hidden");
+    filterSessionButton.textContent = state.filterSession ? "Show all files" : "Session files only";
+    filterSessionButton.className = state.filterSession
+      ? "cursor-pointer rounded-md border border-[#58a6ff]/40 bg-[#58a6ff]/15 px-3 py-1.5 text-xs font-medium text-[#58a6ff] hover:bg-[#58a6ff]/25"
+      : "cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1.5 text-xs font-medium text-review-text hover:bg-[#21262d]";
+  }
+
   submitButton.disabled = false;
 }
 
@@ -248,9 +267,13 @@ function applyEditorOptions() {
 
 function renderTree() {
   fileTreeEl.innerHTML = "";
-  renderTreeNode(buildTree(reviewData.files), 0);
+  const files = visibleFiles();
+  renderTreeNode(buildTree(files), 0);
   const comments = state.comments.length;
-  summaryEl.textContent = `${reviewData.files.length} file(s) • ${comments} comment(s)${state.overallComment ? " • overall note" : ""}`;
+  const total = reviewData.files.length;
+  const shown = files.length;
+  const countLabel = state.filterSession ? `${shown}/${total} file(s)` : `${total} file(s)`;
+  summaryEl.textContent = `${countLabel} • ${comments} comment(s)${state.overallComment ? " • overall note" : ""}`;
   updateToggleButtons();
 }
 
@@ -655,6 +678,17 @@ toggleWrapButton.addEventListener("click", () => {
     layoutEditor();
     setTimeout(layoutEditor, 50);
   });
+});
+
+filterSessionButton.addEventListener("click", () => {
+  state.filterSession = !state.filterSession;
+  const files = visibleFiles();
+  // If active file is no longer visible, switch to the first visible one.
+  if (files.length > 0 && !files.some((f) => f.id === state.activeFileId)) {
+    saveCurrentScrollPosition();
+    state.activeFileId = files[0].id;
+  }
+  renderAll({ restoreFileScroll: true });
 });
 
 toggleReviewedButton.addEventListener("click", () => {

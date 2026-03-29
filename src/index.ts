@@ -123,38 +123,40 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  async function reviewDiff(ctx: ExtensionCommandContext, sessionOnly: boolean): Promise<void> {
+  async function reviewDiff(ctx: ExtensionCommandContext): Promise<void> {
     if (activeWindow != null) {
       ctx.ui.notify("A diff review window is already open.", "warning");
       return;
     }
 
-    let filterPaths: Set<string> | undefined;
-    if (sessionOnly) {
-      if (sessionTouchedFiles.size === 0) {
-        ctx.ui.notify("No files were edited or written in this session.", "info");
-        return;
-      }
-      // Re-resolve paths relative to the repo root (not cwd).
-      try {
-        const repoRoot = await getRepoRoot(pi, ctx.cwd);
-        filterPaths = new Set<string>();
-        for (const p of sessionTouchedFiles) {
-          const abs = isAbsolute(p) ? p : undefined;
-          filterPaths.add(abs != null ? toRepoRelative(abs, repoRoot) : toRepoRelative(p, repoRoot));
-        }
-      } catch {
-        filterPaths = sessionTouchedFiles;
-      }
-    }
-
-    const { repoRoot, files } = await getDiffReviewFiles(pi, ctx.cwd, filterPaths);
+    const { repoRoot, files } = await getDiffReviewFiles(pi, ctx.cwd);
     if (files.length === 0) {
-      ctx.ui.notify(sessionOnly ? "No session changes to review (files may already be committed)." : "No git diff to review.", "info");
+      ctx.ui.notify("No git diff to review.", "info");
       return;
     }
 
-    const html = buildReviewHtml({ repoRoot, files });
+    // Resolve session-touched paths relative to the repo root so they
+    // can be matched against the file ids built by getDiffReviewFiles.
+    const sessionFileIds: string[] = [];
+    if (sessionTouchedFiles.size > 0) {
+      let root: string;
+      try {
+        root = await getRepoRoot(pi, ctx.cwd);
+      } catch {
+        root = ctx.cwd;
+      }
+      const relPaths = new Set<string>();
+      for (const p of sessionTouchedFiles) {
+        relPaths.add(isAbsolute(p) ? toRepoRelative(p, root) : toRepoRelative(p, root));
+      }
+      for (const f of files) {
+        if ((f.oldPath != null && relPaths.has(f.oldPath)) || (f.newPath != null && relPaths.has(f.newPath))) {
+          sessionFileIds.push(f.id);
+        }
+      }
+    }
+
+    const html = buildReviewHtml({ repoRoot, files, sessionFileIds });
     const windowOpts = { width: 1680, height: 1020, title: "pi diff review" };
     const window = isWSL()
       ? openWSL(html, windowOpts)
@@ -245,16 +247,9 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.registerCommand("diff-review", {
-    description: "Review the full working-tree diff against HEAD in a native diff window",
+    description: "Open a native diff review window and insert review feedback into the editor",
     handler: async (_args, ctx) => {
-      await reviewDiff(ctx, false);
-    },
-  });
-
-  pi.registerCommand("diff-review-session", {
-    description: "Review only the files edited/written during this pi session",
-    handler: async (_args, ctx) => {
-      await reviewDiff(ctx, true);
+      await reviewDiff(ctx);
     },
   });
 

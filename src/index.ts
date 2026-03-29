@@ -5,6 +5,7 @@ import { getDiffReviewFiles } from "./git.js";
 import { composeReviewPrompt } from "./prompt.js";
 import type { ReviewSubmitPayload, ReviewWindowMessage } from "./types.js";
 import { buildReviewHtml } from "./ui.js";
+import { isWSL, openWSL, type WSLWindow } from "./wsl-bridge.js";
 
 function isSubmitPayload(value: ReviewWindowMessage): value is ReviewSubmitPayload {
   return value.type === "submit";
@@ -12,8 +13,10 @@ function isSubmitPayload(value: ReviewWindowMessage): value is ReviewSubmitPaylo
 
 type WaitingEditorResult = "escape" | "window-settled";
 
+type ReviewWindow = GlimpseWindow | WSLWindow;
+
 export default function (pi: ExtensionAPI) {
-  let activeWindow: GlimpseWindow | null = null;
+  let activeWindow: ReviewWindow | null = null;
   let activeWaitingUIDismiss: (() => void) | null = null;
 
   function closeActiveWindow(): void {
@@ -104,11 +107,10 @@ export default function (pi: ExtensionAPI) {
     }
 
     const html = buildReviewHtml({ repoRoot, files });
-    const window = open(html, {
-      width: 1680,
-      height: 1020,
-      title: "pi diff review",
-    });
+    const windowOpts = { width: 1680, height: 1020, title: "pi diff review" };
+    const window = isWSL()
+      ? openWSL(html, windowOpts)
+      : open(html, windowOpts);
     activeWindow = window;
 
     const waitingUI = showWaitingUI(ctx);

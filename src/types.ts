@@ -25,6 +25,8 @@ export interface ReviewSubmitPayload {
   type: "submit";
   overallComment: string;
   comments: DiffReviewComment[];
+  /** "provider/modelId" chosen in the review window. */
+  modelKey?: string;
 }
 
 export interface ReviewCancelPayload {
@@ -33,9 +35,20 @@ export interface ReviewCancelPayload {
 
 export type ReviewWindowMessage = ReviewSubmitPayload | ReviewCancelPayload;
 
+export interface ModelChoice {
+  /** "provider/modelId" — used as the value for the select. */
+  key: string;
+  /** Display label, e.g. "anthropic / claude-sonnet-4-20250514" */
+  label: string;
+}
+
 export interface DiffReviewWindowData {
   repoRoot: string;
   files: DiffReviewFile[];
   /** File ids that were touched during this pi session (edit/write). Empty when nothing was tracked. */
   sessionFileIds: string[];
+  /** Available models the user can pick from. */
+  models: ModelChoice[];
+  /** Currently active model key. */
+  currentModelKey: string;
 }

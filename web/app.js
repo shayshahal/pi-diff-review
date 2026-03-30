@@ -32,11 +32,29 @@ const cancelButton = document.getElementById("cancel-button");
 const overallCommentButton = document.getElementById("overall-comment-button");
 const fileCommentButton = document.getElementById("file-comment-button");
 const filterSessionButton = document.getElementById("filter-session-button");
+const modelSelect = document.getElementById("model-select");
 const toggleReviewedButton = document.getElementById("toggle-reviewed-button");
 const toggleUnchangedButton = document.getElementById("toggle-unchanged-button");
 const toggleWrapButton = document.getElementById("toggle-wrap-button");
 
 repoRootEl.textContent = reviewData.repoRoot || "";
+
+// Populate model selector
+(function initModelSelect() {
+  const models = reviewData.models || [];
+  const current = reviewData.currentModelKey || "";
+  if (models.length === 0) {
+    modelSelect.style.display = "none";
+    return;
+  }
+  models.forEach(function (m) {
+    const opt = document.createElement("option");
+    opt.value = m.key;
+    opt.textContent = m.label;
+    if (m.key === current) opt.selected = true;
+    modelSelect.appendChild(opt);
+  });
+})();
 
 let monacoApi = null;
 let diffEditor = null;
@@ -645,6 +663,7 @@ submitButton.addEventListener("click", () => {
     type: "submit",
     overallComment: state.overallComment.trim(),
     comments: state.comments.map((comment) => ({ ...comment, body: comment.body.trim() })).filter((comment) => comment.body.length > 0),
+    modelKey: modelSelect.value || undefined,
   };
   window.glimpse.send(payload);
   window.glimpse.close();

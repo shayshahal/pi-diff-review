@@ -156,7 +156,16 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    const html = buildReviewHtml({ repoRoot, files, sessionFileIds });
+    // Collect available models for the dropdown.
+    const availableModels = ctx.modelRegistry.getAvailable();
+    const currentModel = ctx.model;
+    const currentModelKey = currentModel != null ? `${currentModel.provider}/${currentModel.id}` : "";
+    const models = availableModels.map((m) => ({
+      key: `${m.provider}/${m.id}`,
+      label: `${m.provider} / ${m.name}`,
+    }));
+
+    const html = buildReviewHtml({ repoRoot, files, sessionFileIds, models, currentModelKey });
     const windowOpts = { width: 1680, height: 1020, title: "pi diff review" };
     const window = isWSL()
       ? openWSL(html, windowOpts)
@@ -236,8 +245,20 @@ export default function (pi: ExtensionAPI) {
       }
 
       const prompt = composeReviewPrompt(files, message);
-      ctx.ui.setEditorText(prompt);
-      ctx.ui.notify("Inserted diff review feedback into the editor.", "info");
+
+      // Switch model if the user picked a different one.
+      if (message.modelKey != null && message.modelKey !== currentModelKey) {
+        const [provider, ...rest] = message.modelKey.split("/");
+        const modelId = rest.join("/");
+        const target = ctx.modelRegistry.find(provider, modelId);
+        if (target != null) {
+          await pi.setModel(target);
+        }
+      }
+
+      // Send the review prompt directly to the agent.
+      pi.sendUserMessage(prompt);
+      ctx.ui.notify("Sent diff review feedback to agent.", "info");
     } catch (error) {
       activeWaitingUIDismiss?.();
       closeActiveWindow();

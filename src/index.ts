@@ -1,4 +1,4 @@
-import { isAbsolute, relative } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
 import { open, type GlimpseWindow } from "glimpseui";
@@ -22,30 +22,17 @@ export default function (pi: ExtensionAPI) {
 
   /* ── Track files touched during this session ───────────────────────── */
 
+  /** Raw paths recorded from edit/write tool calls (absolute or relative). */
   const sessionTouchedFiles = new Set<string>();
 
-  /** Normalise an absolute path to a repo-relative path (best-effort). */
-  function toRepoRelative(absPath: string, cwd: string): string {
-    // Paths from tool calls are typically already absolute.
-    const rel = relative(cwd, absPath);
-    // If relative() produced something outside the cwd, keep as-is.
-    if (rel.startsWith("..") || isAbsolute(rel)) return absPath;
-    return rel;
-  }
-
-  function recordPath(rawPath: string, cwd: string): void {
-    const abs = isAbsolute(rawPath) ? rawPath : undefined;
-    // Store the repo-relative form so it matches git diff output.
-    sessionTouchedFiles.add(abs != null ? toRepoRelative(abs, cwd) : rawPath);
-  }
-
   pi.on("tool_result", async (event, ctx) => {
-    const cwd = ctx.cwd;
     if (event.toolName === "edit" || event.toolName === "write") {
-      const path = (event.input as { path?: string }).path;
-      if (typeof path === "string") recordPath(path, cwd);
+      const p = (event.input as { path?: string }).path;
+      if (typeof p === "string") {
+        // Store the absolute form so we can reliably resolve later.
+        sessionTouchedFiles.add(isAbsolute(p) ? p : join(ctx.cwd, p));
+      }
     }
-    // bash tool: we can't easily know what files it changed, skip.
   });
 
   function closeActiveWindow(): void {
@@ -135,19 +122,16 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    // Resolve session-touched paths relative to the repo root so they
-    // can be matched against the file ids built by getDiffReviewFiles.
+    // Convert absolute session paths to repo-relative so they match
+    // the oldPath/newPath values from git diff.
     const sessionFileIds: string[] = [];
     if (sessionTouchedFiles.size > 0) {
-      let root: string;
-      try {
-        root = await getRepoRoot(pi, ctx.cwd);
-      } catch {
-        root = ctx.cwd;
-      }
       const relPaths = new Set<string>();
-      for (const p of sessionTouchedFiles) {
-        relPaths.add(isAbsolute(p) ? toRepoRelative(p, root) : toRepoRelative(p, root));
+      for (const absPath of sessionTouchedFiles) {
+        const rel = relative(repoRoot, absPath);
+        if (!rel.startsWith("..") && !isAbsolute(rel)) {
+          relPaths.add(rel);
+        }
       }
       for (const f of files) {
         if ((f.oldPath != null && relPaths.has(f.oldPath)) || (f.newPath != null && relPaths.has(f.newPath))) {

@@ -214,9 +214,6 @@ export class WSLWindow extends EventEmitter {
     port: number,
     options: WSLWindowOptions,
   ): void {
-    const width = options.width ?? 800;
-    const height = options.height ?? 600;
-
     // A unique profile dir on the Windows filesystem is required so that
     // Chrome launches a fresh instance instead of delegating to an
     // already-running one (which would cause the spawned process to exit
@@ -234,11 +231,14 @@ export class WSLWindow extends EventEmitter {
       "--disable-sync",
       "--disable-translate",
       `--user-data-dir=${profileDir}`,
-      `--window-size=${width},${height}`,
     ];
 
     if (options.startMaximized) {
       args.push("--start-maximized");
+    } else {
+      const width = options.width ?? 800;
+      const height = options.height ?? 600;
+      args.push(`--window-size=${width},${height}`);
     }
 
     this.proc = spawn(browserPath, args, {

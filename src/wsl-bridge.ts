@@ -115,6 +115,7 @@ export interface WSLWindowOptions {
   width?: number;
   height?: number;
   title?: string;
+  startMaximized?: boolean;
 }
 
 export class WSLWindow extends EventEmitter {
@@ -235,6 +236,10 @@ export class WSLWindow extends EventEmitter {
       `--user-data-dir=${profileDir}`,
       `--window-size=${width},${height}`,
     ];
+
+    if (options.startMaximized) {
+      args.push("--start-maximized");
+    }
 
     this.proc = spawn(browserPath, args, {
       stdio: "ignore",

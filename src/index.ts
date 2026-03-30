@@ -166,7 +166,7 @@ export default function (pi: ExtensionAPI) {
     }));
 
     const html = buildReviewHtml({ repoRoot, files, sessionFileIds, models, currentModelKey });
-    const windowOpts = { width: 1680, height: 1020, title: "pi diff review" };
+    const windowOpts = { width: 1680, height: 1020, title: "pi diff review", startMaximized: true };
     const window = isWSL()
       ? openWSL(html, windowOpts)
       : open(html, windowOpts);

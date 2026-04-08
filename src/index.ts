@@ -2,9 +2,17 @@ import { isAbsolute, join, relative } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
 import { open, type GlimpseWindow } from "glimpseui";
-import { getDiffReviewFiles, getRepoRoot } from "./git.js";
+import { getReviewWindowData, loadReviewFileContents } from "./git.js";
 import { composeReviewPrompt } from "./prompt.js";
-import type { ReviewSubmitPayload, ReviewWindowMessage } from "./types.js";
+import type {
+  ReviewCancelPayload,
+  ReviewFile,
+  ReviewFileContents,
+  ReviewHostMessage,
+  ReviewRequestFilePayload,
+  ReviewSubmitPayload,
+  ReviewWindowMessage,
+} from "./types.js";
 import { buildReviewHtml } from "./ui.js";
 import { isWSL, openWSL, type WSLWindow } from "./wsl-bridge.js";
 
@@ -12,27 +20,47 @@ function isSubmitPayload(value: ReviewWindowMessage): value is ReviewSubmitPaylo
   return value.type === "submit";
 }
 
-type WaitingEditorResult = "escape" | "window-settled";
+function isCancelPayload(value: ReviewWindowMessage): value is ReviewCancelPayload {
+  return value.type === "cancel";
+}
 
+function isRequestFilePayload(value: ReviewWindowMessage): value is ReviewRequestFilePayload {
+  return value.type === "request-file";
+}
+
+type WaitingEditorResult = "escape" | "window-settled";
 type ReviewWindow = GlimpseWindow | WSLWindow;
+
+function escapeForInlineScript(value: string): string {
+  return value.replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
+}
+
+function reviewFileMatchesPath(file: ReviewFile, relPath: string): boolean {
+  if (file.path === relPath) return true;
+
+  const comparisons = [file.gitDiff, file.lastCommit];
+  for (const comparison of comparisons) {
+    if (comparison == null) continue;
+    if (comparison.oldPath === relPath || comparison.newPath === relPath) {
+      return true;
+    }
+  }
+
+  return false;
+}
 
 export default function (pi: ExtensionAPI) {
   let activeWindow: ReviewWindow | null = null;
   let activeWaitingUIDismiss: (() => void) | null = null;
 
-  /* ── Track files touched during this session ───────────────────────── */
-
-  /** Raw paths recorded from edit/write tool calls (absolute or relative). */
+  // Raw absolute paths touched by edit/write in this session.
   const sessionTouchedFiles = new Set<string>();
 
   pi.on("tool_result", async (event, ctx) => {
-    if (event.toolName === "edit" || event.toolName === "write") {
-      const p = (event.input as { path?: string }).path;
-      if (typeof p === "string") {
-        // Store the absolute form so we can reliably resolve later.
-        sessionTouchedFiles.add(isAbsolute(p) ? p : join(ctx.cwd, p));
-      }
-    }
+    if (event.toolName !== "edit" && event.toolName !== "write") return;
+    const pathValue = (event.input as { path?: string }).path;
+    if (typeof pathValue !== "string") return;
+    sessionTouchedFiles.add(isAbsolute(pathValue) ? pathValue : join(ctx.cwd, pathValue));
   });
 
   function closeActiveWindow(): void {
@@ -80,7 +108,7 @@ export default function (pi: ExtensionAPI) {
           const borderBottom = theme.fg("border", `╰${"─".repeat(innerWidth)}╯`);
           const lines = [
             theme.fg("accent", theme.bold("Waiting for review")),
-            "The native diff review window is open.",
+            "The native review window is open.",
             "Press Escape to cancel and close the review window.",
           ];
           return [
@@ -110,58 +138,83 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  async function reviewDiff(ctx: ExtensionCommandContext): Promise<void> {
+  async function reviewRepository(ctx: ExtensionCommandContext): Promise<void> {
     if (activeWindow != null) {
-      ctx.ui.notify("A diff review window is already open.", "warning");
+      ctx.ui.notify("A review window is already open.", "warning");
       return;
     }
 
-    const { repoRoot, files } = await getDiffReviewFiles(pi, ctx.cwd);
+    const { repoRoot, files } = await getReviewWindowData(pi, ctx.cwd);
     if (files.length === 0) {
-      ctx.ui.notify("No git diff to review.", "info");
+      ctx.ui.notify("No reviewable files found.", "info");
       return;
     }
 
-    // Convert absolute session paths to repo-relative so they match
-    // the oldPath/newPath values from git diff.
     const sessionFileIds: string[] = [];
     if (sessionTouchedFiles.size > 0) {
-      const relPaths = new Set<string>();
+      const relativePaths = new Set<string>();
       for (const absPath of sessionTouchedFiles) {
-        const rel = relative(repoRoot, absPath);
-        if (!rel.startsWith("..") && !isAbsolute(rel)) {
-          relPaths.add(rel);
-        }
+        const relPath = relative(repoRoot, absPath);
+        if (relPath.startsWith("..") || isAbsolute(relPath)) continue;
+        relativePaths.add(relPath);
       }
-      for (const f of files) {
-        if ((f.oldPath != null && relPaths.has(f.oldPath)) || (f.newPath != null && relPaths.has(f.newPath))) {
-          sessionFileIds.push(f.id);
+
+      for (const file of files) {
+        for (const relPath of relativePaths) {
+          if (!reviewFileMatchesPath(file, relPath)) continue;
+          sessionFileIds.push(file.id);
+          break;
         }
       }
     }
 
-    // Collect available models for the dropdown.
     const availableModels = ctx.modelRegistry.getAvailable();
     const currentModel = ctx.model;
     const currentModelKey = currentModel != null ? `${currentModel.provider}/${currentModel.id}` : "";
-    const models = availableModels.map((m) => ({
-      key: `${m.provider}/${m.id}`,
-      label: `${m.provider} / ${m.name}`,
+    const models = availableModels.map((model) => ({
+      key: `${model.provider}/${model.id}`,
+      label: `${model.provider} / ${model.name}`,
     }));
 
-    const html = buildReviewHtml({ repoRoot, files, sessionFileIds, models, currentModelKey });
-    const windowOpts = { width: 1680, height: 1020, title: "pi diff review", startMaximized: true };
+    const html = buildReviewHtml({
+      repoRoot,
+      files,
+      sessionFileIds,
+      models,
+      currentModelKey,
+      windowTitle: "Diff review",
+    });
+
     const window = isWSL()
-      ? openWSL(html, windowOpts)
-      : open(html, windowOpts);
+      ? openWSL(html, { width: 1680, height: 1020, title: "pi diff review", startMaximized: true })
+      : open(html, { width: 1680, height: 1020, title: "pi diff review" });
+
     activeWindow = window;
 
     const waitingUI = showWaitingUI(ctx);
+    const fileMap = new Map(files.map((file) => [file.id, file]));
+    const contentCache = new Map<string, Promise<ReviewFileContents>>();
 
-    ctx.ui.notify("Opened native diff review window.", "info");
+    const sendWindowMessage = (message: ReviewHostMessage): void => {
+      if (activeWindow !== window) return;
+      const payload = escapeForInlineScript(JSON.stringify(message));
+      window.send(`window.__reviewReceive(${payload});`);
+    };
+
+    const loadContents = (file: ReviewFile, scope: ReviewRequestFilePayload["scope"]): Promise<ReviewFileContents> => {
+      const cacheKey = `${scope}:${file.id}`;
+      const cached = contentCache.get(cacheKey);
+      if (cached != null) return cached;
+
+      const pending = loadReviewFileContents(pi, repoRoot, file, scope);
+      contentCache.set(cacheKey, pending);
+      return pending;
+    };
+
+    ctx.ui.notify("Opened native review window.", "info");
 
     try {
-      const windowMessagePromise = new Promise<ReviewWindowMessage | null>((resolve, reject) => {
+      const terminalMessagePromise = new Promise<ReviewSubmitPayload | ReviewCancelPayload | null>((resolve, reject) => {
         let settled = false;
 
         const cleanup = (): void => {
@@ -173,15 +226,57 @@ export default function (pi: ExtensionAPI) {
           }
         };
 
-        const settle = (value: ReviewWindowMessage | null): void => {
+        const settle = (value: ReviewSubmitPayload | ReviewCancelPayload | null): void => {
           if (settled) return;
           settled = true;
           cleanup();
           resolve(value);
         };
 
+        const handleRequestFile = async (message: ReviewRequestFilePayload): Promise<void> => {
+          const file = fileMap.get(message.fileId);
+          if (file == null) {
+            sendWindowMessage({
+              type: "file-error",
+              requestId: message.requestId,
+              fileId: message.fileId,
+              scope: message.scope,
+              message: "Unknown file requested.",
+            });
+            return;
+          }
+
+          try {
+            const contents = await loadContents(file, message.scope);
+            sendWindowMessage({
+              type: "file-data",
+              requestId: message.requestId,
+              fileId: message.fileId,
+              scope: message.scope,
+              originalContent: contents.originalContent,
+              modifiedContent: contents.modifiedContent,
+            });
+          } catch (error) {
+            const messageText = error instanceof Error ? error.message : String(error);
+            sendWindowMessage({
+              type: "file-error",
+              requestId: message.requestId,
+              fileId: message.fileId,
+              scope: message.scope,
+              message: messageText,
+            });
+          }
+        };
+
         const onMessage = (data: unknown): void => {
-          settle(data as ReviewWindowMessage);
+          const message = data as ReviewWindowMessage;
+          if (isRequestFilePayload(message)) {
+            void handleRequestFile(message);
+            return;
+          }
+          if (isSubmitPayload(message) || isCancelPayload(message)) {
+            settle(message);
+          }
         };
 
         const onClosed = (): void => {
@@ -201,60 +296,55 @@ export default function (pi: ExtensionAPI) {
       });
 
       const result = await Promise.race([
-        windowMessagePromise.then((message) => ({ type: "window" as const, message })),
+        terminalMessagePromise.then((message) => ({ type: "window" as const, message })),
         waitingUI.promise.then((reason) => ({ type: "ui" as const, reason })),
       ]);
 
       if (result.type === "ui" && result.reason === "escape") {
         closeActiveWindow();
-        await windowMessagePromise.catch(() => null);
-        ctx.ui.notify("Diff review cancelled.", "info");
+        await terminalMessagePromise.catch(() => null);
+        ctx.ui.notify("Review cancelled.", "info");
         return;
       }
 
-      const message = result.type === "window" ? result.message : await windowMessagePromise;
+      const message = result.type === "window" ? result.message : await terminalMessagePromise;
 
       waitingUI.dismiss();
       await waitingUI.promise;
       closeActiveWindow();
 
       if (message == null || message.type === "cancel") {
-        ctx.ui.notify("Diff review cancelled.", "info");
-        return;
-      }
-
-      if (!isSubmitPayload(message)) {
-        ctx.ui.notify("Diff review returned an unknown payload.", "error");
+        ctx.ui.notify("Review cancelled.", "info");
         return;
       }
 
       const prompt = composeReviewPrompt(files, message);
 
-      // Switch model if the user picked a different one.
       if (message.modelKey != null && message.modelKey !== currentModelKey) {
-        const [provider, ...rest] = message.modelKey.split("/");
-        const modelId = rest.join("/");
-        const target = ctx.modelRegistry.find(provider, modelId);
-        if (target != null) {
-          await pi.setModel(target);
+        const [provider, ...modelParts] = message.modelKey.split("/");
+        const modelId = modelParts.join("/");
+        if (provider.length > 0 && modelId.length > 0) {
+          const targetModel = ctx.modelRegistry.find(provider, modelId);
+          if (targetModel != null) {
+            await pi.setModel(targetModel);
+          }
         }
       }
 
-      // Send the review prompt directly to the agent.
       pi.sendUserMessage(prompt);
       ctx.ui.notify("Sent diff review feedback to agent.", "info");
     } catch (error) {
       activeWaitingUIDismiss?.();
       closeActiveWindow();
       const message = error instanceof Error ? error.message : String(error);
-      ctx.ui.notify(`Diff review failed: ${message}`, "error");
+      ctx.ui.notify(`Review failed: ${message}`, "error");
     }
   }
 
   pi.registerCommand("diff-review", {
-    description: "Open a native diff review window and insert review feedback into the editor",
+    description: "Open a native review window with git diff, last commit, and all files scopes",
     handler: async (_args, ctx) => {
-      await reviewDiff(ctx);
+      await reviewRepository(ctx);
     },
   });
 

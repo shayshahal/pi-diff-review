@@ -69,6 +69,32 @@ function getWindowsTemp(): string {
  *  existing app.js code works unchanged. */
 const BRIDGE_SCRIPT = `<script>
 (function() {
+  function applyHostCommands(commands) {
+    if (!Array.isArray(commands)) return;
+    for (var i = 0; i < commands.length; i += 1) {
+      try {
+        (0, eval)(String(commands[i]));
+      } catch (err) {
+        console.error('WSL bridge command failed', err);
+      }
+    }
+  }
+
+  async function pollHostCommands() {
+    while (true) {
+      try {
+        var res = await fetch('/api/commands', { cache: 'no-store' });
+        if (res.ok) {
+          var payload = await res.json();
+          applyHostCommands(payload && payload.commands);
+        }
+      } catch (err) {
+        console.error('WSL bridge poll failed', err);
+      }
+      await new Promise(function(resolve) { setTimeout(resolve, 120); });
+    }
+  }
+
   window.glimpse = {
     cursorTip: null,
     send: function(data) {
@@ -86,6 +112,8 @@ const BRIDGE_SCRIPT = `<script>
       window.close();
     }
   };
+
+  pollHostCommands();
 })();
 </script>`;
 
@@ -123,6 +151,7 @@ export class WSLWindow extends EventEmitter {
   private proc: ChildProcess | null = null;
   private closed = false;
   private readyEmitted = false;
+  private pendingCommands: string[] = [];
 
   constructor(html: string, options: WSLWindowOptions = {}) {
     super();
@@ -171,6 +200,15 @@ export class WSLWindow extends EventEmitter {
         }
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
         res.end(html);
+        return;
+      }
+
+      /* bridge host -> browser commands */
+      if (req.method === "GET" && url.pathname === "/api/commands") {
+        const commands = this.pendingCommands;
+        this.pendingCommands = [];
+        res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+        res.end(JSON.stringify({ commands }));
         return;
       }
 
@@ -257,8 +295,9 @@ export class WSLWindow extends EventEmitter {
 
   /* ── Public API (matches GlimpseWindow) ──────────────────────────────── */
 
-  send(_js: string): void {
-    /* eval in browser — not needed for diff-review, no-op */
+  send(js: string): void {
+    if (this.closed) return;
+    this.pendingCommands.push(js);
   }
 
   setHTML(_html: string): void {
